@@ -8,9 +8,11 @@ from app.config import Config
 def connect(db_path: str | None = None) -> sqlite3.Connection:
     path = db_path or Config.database()
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path, check_same_thread=False)
+    conn = sqlite3.connect(path, check_same_thread=False, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    # 并发补盖时让后到的写入等待排他事务，而不是立刻抛 database is locked。
+    conn.execute("PRAGMA busy_timeout = 15000")
     return conn
 
 
@@ -22,6 +24,30 @@ def get_db(db_path: str | None = None):
         conn.commit()
     except Exception:
         conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+@contextmanager
+def get_write_db(db_path: str | None = None):
+    """排他写事务。
+
+    BEGIN IMMEDIATE 会在事务开始时就拿写锁；读取缺口、写入补盖印、回写任务
+    记录因此处于同一个排他窗口里，两个仓管同时点补盖也不会各自读到同一批
+    缺口后再把同一行写两遍。
+    """
+    conn = connect(db_path)
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        yield conn
+        conn.execute("COMMIT")
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
         raise
     finally:
         conn.close()
@@ -65,6 +91,51 @@ CREATE TABLE IF NOT EXISTS gap_reports (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS backfill_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  as_of_date TEXT NOT NULL,
+  scope TEXT NOT NULL CHECK (scope IN ('仅缺口','整批重落')),
+  status TEXT NOT NULL CHECK (status IN ('执行中','成功','失败')),
+  expected_count INTEGER NOT NULL DEFAULT 0,
+  stamped_before INTEGER NOT NULL DEFAULT 0,
+  gap_before INTEGER NOT NULL DEFAULT 0,
+  new_count INTEGER NOT NULL DEFAULT 0,
+  preserved_count INTEGER NOT NULL DEFAULT 0,
+  replaced_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  total_count INTEGER NOT NULL DEFAULT 0,
+  replay_count INTEGER NOT NULL DEFAULT 0,
+  message TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS backfill_rounds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  round_no INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('成功','失败')),
+  expected_count INTEGER NOT NULL DEFAULT 0,
+  stamped_before INTEGER NOT NULL DEFAULT 0,
+  gap_before INTEGER NOT NULL DEFAULT 0,
+  new_count INTEGER NOT NULL DEFAULT 0,
+  preserved_count INTEGER NOT NULL DEFAULT 0,
+  replaced_count INTEGER NOT NULL DEFAULT 0,
+  skipped_count INTEGER NOT NULL DEFAULT 0,
+  total_count INTEGER NOT NULL DEFAULT 0,
+  message TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(task_id, round_no)
+);
+
+CREATE TABLE IF NOT EXISTS backfill_locks (
+  lock_key TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  acquired_epoch INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
@@ -93,6 +164,11 @@ SEED_EDGES = [
 
 def init_db(db_path: str | None = None) -> None:
     with get_db(db_path) as conn:
+        try:
+            conn.execute("PRAGMA journal_mode = WAL")
+        except sqlite3.Error:
+            # 某些卷（网络盘/容器只读参数）不支持 WAL，退回默认日志模式。
+            pass
         conn.executescript(SCHEMA)
         row = conn.execute("SELECT value FROM meta WHERE key='seeded'").fetchone()
         if row:

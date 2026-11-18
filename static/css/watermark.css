@@ -99,3 +99,39 @@ th { color: var(--muted); font-weight: 500; }
   border: 1px dashed var(--line);
   border-radius: 14px;
 }
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 0.8rem;
+}
+.batch-card { margin-top: 0; }
+.chip.ok { background: #d9f0c2; }
+.chip.warn { background: #fde3b8; }
+.chip.scope {
+  background: var(--lime-ink);
+  color: #f4ffe0;
+  font-weight: 700;
+}
+.chip.fate { background: #e5eadf; }
+.gap-row { background: rgba(253, 227, 184, 0.35); }
+.scope-picker .scope-option {
+  display: grid;
+  gap: 0.15rem;
+  margin: 0;
+  padding: 0.6rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: #fff;
+  cursor: pointer;
+  color: var(--ink);
+}
+.scope-option.on {
+  border-color: #8bc34a;
+  box-shadow: inset 0 0 0 1px #8bc34a;
+  background: #f4ffe6;
+}
+.scope-option input { justify-self: start; padding: 0; }
+.rounds { display: grid; gap: 0.6rem; margin-top: 0.6rem; }
+.round { margin-top: 0; }
+.round.aligned { border-color: #8bc34a; }
+.round.drift { border-color: var(--danger); }
